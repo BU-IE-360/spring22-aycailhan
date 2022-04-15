@@ -2,7 +2,7 @@
 
 
 ### Homework 1
-[Homework 1](https://bu-ie-360.github.io/spring22-aycailhan/
+[Homework 1](https://bu-ie-360.github.io/spring22-aycailhan/HW-IE-360.html): Here is my .html file for Homework 1
 ### Homework 2
 ### Homework 3
 
