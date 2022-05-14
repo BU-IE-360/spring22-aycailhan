@@ -1,0 +1,305 @@
+---
+title: "IE 360 HW 2"
+author: "Ayca Ilhan"
+date: '2022-05-13'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1.INTRODUCTION
+
+The aim of this assignment is to forecast Unleaded Gasoline Sales for every quarter of 2007 by using time series regression methods. Previous quarterly sales of UGS starting from the first quarter of 2000 until the last quarter of 2006 are given. They are given in 1000 m3.Along with UGS data, potential independent variables and their previous quarterly values between 2000-2006 are given. These potential independent variables are as follows:
+
+-   **RNUV:** An index indicating the rate of new unleaded gasoline using vehicles being added to the traffic in a quarter,
+-   **PU:** Average price (adjusted with an index) of a liter of unleaded gasoline in a quarter,
+-   **PG:** Average price (adjusted with an index) of a liter of diesel gasoline in a quarter,
+-   **NUGV:** Number of unleaded gasoline using vehicles in the traffic,
+-   **NDGV:** Number of diesel gasoline using vehicles in the traffic (per 1000 people),
+-   **GNPA:** Agriculture component of Gross National Product (adjusted with an index),
+-   **GNPC:** Commerce component of Gross National Product (adjusted with an index),
+-   **GNP:** Grand total for GNP (agriculture, commerce and other components total)
+
+By looking at the autocorrelation, correlation between our target values (UGS) and potential independent variables a time series regression model will be constructed and at the end predicted quarterly values of the upcoming year, 2007, will be represented.
+
+## 2.DATA PREPARATION
+
+Before constructing the regression model, necessarry data manipulations are done.
+
+```{r,message=FALSE}
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(RColorBrewer)
+library(zoo)
+library(GGally)
+library(xts)
+```
+
+```{r,message=FALSE,results='hide'}
+data<-read.csv("C:\\Users\\ilker\\Documents\\IE360_Spring22_HW2_data.csv")
+str(data)
+is.ts(data)
+data<-data%>%dplyr::rename(UGS=Unleaded.Gasoline.Sale..UGS.,NLPG=X..LPG.Vehicles..NLPG.,PU=Price.of.Unleaded.Gasoline..PU.,
+                           PG=Price.of.Diesel.Gasoline..PG., NUGV=X..Unleaded.Gasoline.Vehicles..NUGV.,NDGV=X..of.Diesel.Gasoline.Vehicles..NDGV.)%>%
+  mutate(Quarter=as.Date(as.yearqtr(Quarter,format="%Y_Q%q")))
+data$UGS<-as.numeric(gsub(" ", "", data$UGS))
+data$NLPG<-as.numeric(gsub(" ", "", data$NLPG))
+data$NUGV<-as.numeric(gsub(" ", "", data$NUGV))
+data$GNP.Agriculture<-as.numeric(gsub(" ", "", data$GNP.Agriculture))
+data$GNP.Commerce<-as.numeric(gsub(" ", "", data$GNP.Commerce))
+data$GNP.Total<-as.numeric(gsub(" ", "", data$GNP.Total))
+str(data)
+```
+
+## 3.DATA VISUALIZATION
+
+### 3.1 Visualization of the Target Variable-UGS
+
+```{r, message=FALSE,warning=FALSE}
+ggplot(data, aes(Quarter,UGS))+geom_line(color="#E46726")+theme_grey()+
+  ggtitle("Quarterly Unleaded Gasoline Sales Between 2000/Q1 to 2006/Q4")+xlab("Years")+ylab("UGS")
+```
+
+As it can be seen from the plot, unleaded gasoline sales displays downward trend and seasonality. Since it is a quarterly data, observing seasonality is expected.To observe the time series data better we also need to look at autocorrelation of our target value, UGS.
+
+### 3.2 AutoCorrelation of UGS
+
+```{r, message=FALSE}
+library(ggcorrplot)
+#autocorrelations
+acf(data$UGS,lag.max = 12,na.action = na.pass)
+```
+
+Autocorrelation of UGS shows that values are highly correlated at lag 4 and lag 1. High correlation at lag 4 may be due to seasonality since after each 4 data the season repeats. To deal with this, later we will add seasonal dummy variables to our model.Also to deal with lag 1 we will add UGSt=UGS(t-1) variable to our model as well.
+
+### 3.3 Correlation between UGS and Potential Independent Variables
+
+To construct a good regression model we also need to focus on correlations between different variables. These may play important roles while constructing a logical and efficient model for prediction.
+
+```{r, message=FALSE}
+#first check correlation between independent variables
+corr_analysis=cor(data[c(1:28),c(2:11)])
+ggcorrplot(corr_analysis,hc.order=TRUE,type="lower",lab=TRUE, colors=c("#6D9EC1","white","#E46726"),ggtheme = ggplot2::theme_gray)
+#also for distributions and better pairwise observations
+ggpairs(data[c(1:28),c(2:11)],ggplot2::aes(fill="#C4961A"))+scale_fill_manual(values = "#00AFBB")+ggtitle("Correlation and Distribution Relation of each Parameter")
+```
+
+From these figures above, there are significant correlation between UGS and independent variables NLPG, NDGV, PG,PU, NUGV,GNP.Agriculture.
+
+## 4. BUILDING REGRESSION MODEL
+
+First we need to add trend and seasonality variable:
+
+```{r, message=FALSE}
+#Adding trend 
+library(data.table)
+is.data.frame(data)
+trend<-c(1:nrow((data)))
+data$trend<-trend
+#adding seasonality 
+data$Seasons<-as.factor(quarter(data$Quarter))
+```
+
+### 4.1 Only with trend and seasonality
+
+```{r, message=FALSE}
+#first regression model with only trend
+library(forecast)
+lm0=lm(UGS~trend,data=data)
+summary(lm0)
+```
+
+The base regression model shows that trend has a high significance in the model but the adjusted R value is really small with 0.4552
+
+```{r}
+checkresiduals(lm0)
+
+```
+
+Also after checking the residuals, the model still displays high correlation at lag 4. So we also need to add seasonal dummy variables
+
+```{r,message=FALSE}
+#Also add seasonality
+lm1=lm(UGS~trend+Seasons,data=data)
+summary(lm1)
+
+#residual check for the first linear model
+checkresiduals(lm1)
+```
+
+After adding seasonality dummy variables, adjusted R-square value has gone up to 0.8966 and significant correlation value at lag 4 dropped. Next, we need to add independent variables to the model to see whether they affect the model or not.Also in the next section lagged variables may be added in case it is needed.
+
+### 4.2 Adding Independent and Lagged Variables
+
+```{r,message=FALSE}
+#in case of a need, prepare lagged variables
+#LAG1
+lag1<-shift(data$UGS, n=1L, fill=NA)
+data$lag1<-lag1
+lmlag1=lm(UGS~trend+Seasons+lag1,data=data)
+#summary(lmlag1)
+#checkresiduals(lmlag1)
+#LAG2
+lag2<-shift(data$UGS, n=2L, fill=NA)
+data$lag2<-lag2
+lmlag2=lm(UGS~trend+Seasons+lag2,data=data)
+#summary(lmlag2)
+#checkresiduals(lmlag2)
+#LAG4
+lag4<-shift(data$UGS, n=4L, fill=NA)
+data$lag4<-lag4
+lmlag4=lm(UGS~trend+Seasons+lag4,data=data)
+#summary(lmlag4)
+#checkresiduals(lmlag4)
+```
+
+One of the variables that has a higher correlation value than other variables is start NDGV
+
+```{r, message=FALSE}
+##add NDGV
+lm2=lm(UGS~trend+Seasons+NDGV,data=data)
+summary(lm2)
+checkresiduals(lm2)
+```
+
+After adding it adj. R-square value has gone up to 0.9191 and its t-statistic value is significant but residuals tend to have unstable variance thus we need to add some other variables.
+
+```{r, message=FALSE}
+##Add NUGV
+lm3=lm(UGS~trend+Seasons+NDGV+NUGV,data=data)
+summary(lm3)
+checkresiduals(lm3)
+
+```
+
+Adding NUGV increased adj. R-squared and the residuals got closer to 0 with more stable variance. Also they don't show any high autocorrelation. But still there are remaining variables to be added. We need to try those as well to obtain a better model.
+
+```{r,message=FALSE}
+##add GNP.Agriculture
+lm4=lm(UGS~trend+Seasons+NDGV+NUGV+GNP.Agriculture,data=data)
+summary(lm4)
+checkresiduals(lm4)
+```
+
+Adding GNP.Agriculture variable does not show any significance plus, the autocorrelation of residuals at lag 1 has gone up after adding it so we can drop it.
+
+```{r, message=FALSE}
+#add PG
+lm5=lm(UGS~trend+Seasons+NDGV+PG+NUGV,data=data)
+summary(lm5)
+checkresiduals(lm5)
+```
+
+Adding PG also shows significance but there is still autocorrelation at lag 1 for residuals. To reduce the effect at lag one we can add lag1 variable into our model and observe the results.
+
+```{r, message=FALSE}
+#add lag 1
+lm6=lm(UGS~trend+Seasons+NDGV+PG+NUGV+lag1,data=data)
+summary(lm6)
+checkresiduals(lm6)
+```
+
+Adding lag 1 variable increased adj-R square and residuals got closer to 0 compared to others but this time the residuals shows high correlation at lag 4. To reduce that also lets add lag 4 variable.
+
+```{r,message=FALSE}
+#add lag 4
+lm7=lm(UGS~trend+Seasons+NDGV+PG+NUGV+lag1+lag4,data=data)
+summary(lm7)
+checkresiduals(lm7)
+```
+
+adding lag 4 decreases adj R-square and increased residual mean. To compare these models well we can also draw q-q plots and fitted vs. residuals plots.
+
+```{r,message=FALSE}
+#Plot lm6
+plot(lm6)
+
+```
+
+```{r,message=FALSE}
+#plot lm7
+plot(lm7)
+```
+
+It can be seen that linear model 6 is better since its both "q-q" plot and "residual vs fitted" shows more like normally distributed residuals with 0 mean. Thus our model for the predictions will be lm6.
+
+## 5.Fitting the Model and Prediction
+
+### 5.1 Fitting the Model
+
+```{r,message=FALSE}
+tmp=copy(data)
+is.data.frame(tmp)
+actual<-tmp$UGS
+predicted<-predict(lm6,tmp)
+tmp$actual<-actual
+tmp$predicted<-predicted
+
+#plot the predicted value and the actual ones
+ggplot(tmp[c(3:28),], aes(x=Quarter))+geom_line(aes(y=actual, color="real"))+geom_line(aes(y=predicted, color="prediction"))+theme_grey()+
+  ggtitle("Quarterly Unleaded Gasoline Sales Between 2000/Q1 to 2006/Q4 Predicted and Actual Values")+xlab("Years")+ylab("UGS")
+```
+
+Above, predicted values and actual values are displayed. They behave very similar.
+
+### 5.2 Predicting the Next 4 Quarters.
+
+```{r,message=FALSE}
+predictions=predict(lm6,newdata =data[29:32,])
+predictions
+```
+
+As we use lagged 1 variable we need to use predicted values as observations for the next prediction until an observed values is obtained. Thus the following has to be done:
+
+```{r, message=FALSE}
+tmp[ 30, "lag1"] = predictions[1] 
+tmp$predictions2<-predict(lm6,tmp)
+
+tmp[ 31, "lag1"] = tmp$predictions2[30]
+tmp$predictions2<-predict(lm6,tmp)
+
+tmp[ 32, "lag1"] = tmp$predictions2[31]
+tmp$predictions2<-predict(lm6,tmp)
+```
+
+Now plot with forecasted values:
+
+```{r, message=FALSE}
+#With forecasted values
+ggplot(tmp[c(3:32),], aes(x=Quarter))+geom_line(aes(y=actual, color="real"))+geom_line(aes(y=predictions2, color="prediction"))+theme_grey()+
+  ggtitle("Quarterly Unleaded Gasoline Sales Between 2000/Q1 to 2006/Q4 Predicted and Actual Values")+xlab("Years")+ylab("UGS")
+```
+
+### 5.3 Predicted Values
+
+```{r,message=FALSE}
+results<-data.frame(`predicted UGS sales`=tmp$predictions2[29:32],row.names=c("2007-Q1","2007-Q2","2007-Q3","2007-Q4"))
+results
+```
+
+## 6. Conclusion
+
+After trying many models, the final ended up to be a regression model where the target variable is Unleaded Gasoline Sales **(UGS)** and independent variables ended up to be
+
+-   **PG:***Average price (adjusted with an index) of a liter of diesel gasoline in a quarter,*
+
+-   **NUGV:***Number of unleaded gasoline using vehicles in the traffic,*
+
+-   **NDGV:***Number of diesel gasoline using vehicles in the traffic,*
+
+-   **lag1***:Lagged 1 variable*.
+
+Predictions for 2007 quarters are as follows:
+
+-   **2007-Q1:** *666210.0*
+
+-   **2007-Q2:** *840163.9*
+
+-   **2007-Q3:** *930373.9*
+
+-   **2007-Q4:** *790375.4*
