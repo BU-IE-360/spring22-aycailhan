@@ -1,0 +1,1547 @@
+---
+title: "IE 360- Project"
+author: "Tugce Caglayan-Ayca Ilhan-Ozan Eroglu"
+date: '2022-06-06'
+output: html_document
+---
+
+## 1. Introduction  
+  Forecasting of the energy supply plays an important role on accurate pricing of the energy produced. In the project, main goal is to forecast of KIVANC 2 GES's  production values on a daily basis. 
+  There were 9 grid coordinates near the production facility sites which some datas such as temperature (temp), humidity levels(rel_humidity), cloud level(cloud_low_layer) and radiation flux (dswrf) collected. In order to extract  meaningful parameters from the data, the averages of the values obtained from 9 different regions were taken and used throughout our established models for every variables.
+  Solar power plant's could not generate any electricity at night hours without sun. After making observations on the production data, it was decided to exclude the data before 5 am and after 8 pm on a every day. Also construction date of the facility is 2020 Decemeberand energy production did not start at full capacity, but over time, new parts were opened and production capacities were increased. Besides, it is understood that a regulation of 35 AC Power restriction has been put in place at 2021 by the state. A start date(2022-01-01) has been set for the models so that the past developments that have affected the data we will process do not adversely affect the forecasts to be made.
+  Our approach to the problem starts with cleaning and preparing data for model building. After this stage we construct base models and tried improve these models with investigate the relation between data and different variables. We constructed models that best explain the data we have. At the test period we tried our models to make forecast and iteratively make changes o a daily basis before the competition period starts.
+  
+
+## 2. Literature 
+
+In order to decide on external variables for our model, we made some literature research. As Mariam AlKandari and Imtiaz Ahmad mentioned in “Solar Power Generation Forecasting Using Ensemble Approach Based on Deep Learning and Statistical Methods”; irradiance, air temperature, and precipitation could be collected as input to our prediction model. Also, these ensemble forecasting used linear regression in their hybrid model.
+
+
+# 3.Approach
+First of all, we tried to understand the characteristic structure of the data with data visualization and observed what kind of approach we should apply. After that, we decided on the model and parameters we should choose. In this project, we mainly built models using the forecasting with regression approach, and we aimed to obtain better predictions in each iteration by changing the parameters we use.
+
+
+##  3.1 Reading and Preparing the Data
+We eliminated the data that we thought would mislead our model or that gave stable results without the need for modeling. In the production values that we will be forecasting, we have seen that it has a constant value of 0 between 9.00 pm and 4.00 am due to the sunrise and sunset time. For this reason, we removed the data in the specified time interval from the data we have. In addition, we decided to work with the data from January 2022, since the data for 2021 has changed due to the increase in the number of panels, and it will mislead our model. Afterwards, we combined the weather and production data with the 'datetime' column containing the date and time.
+  
+```{r setup, include=FALSE}
+require(data.table)
+require(lubridate)
+require(ggplot2)
+require(GGally)
+require(forecast)
+require(zoo)
+require(dplyr)
+require(ggcorrplot)
+require(Metrics)
+require(MLmetrics)
+todays_date=Sys.Date()
+forecast_date=todays_date+1
+
+#################
+dataw_path="C:\\Users\\ilker\\Downloads\\2022-06-02_production_weather\\2022-06-02_weather.csv"
+datap_path="C:\\Users\\ilker\\Downloads\\2022-06-02_production_weather\\2022-06-02_production.csv"
+
+dataw=read.csv(dataw_path)
+dataw=data.table(dataw)
+datap=read.csv(datap_path) 
+datap=data.table(datap)
+
+dataw$date=as.Date(dataw$date)
+datap$date=as.Date(datap$date)
+
+dataw[,datetime:=ymd(dataw$date)+dhours(dataw$hour)]
+datap[,datetime:=ymd(datap$date)+dhours(datap$hour)]
+
+datawnew<-reshape(dataw,idvar=c("date","hour","lat","lon"),timevar="variable",direction = "wide",v.names="value")
+
+#head(datawnew,15)
+
+```
+
+### Initial Data Visualization
+
+```{r}
+ggplot(datap,aes(x=datetime,y=production)) + geom_line(color="red")+ggtitle("Hourly Productions")+xlab("Time")+
+  ylab("Production")+
+  theme(legend.position="none")
+```
+
+As it can be seen from the plot hourly production values vary overtime due to different factors. One of the significant difference over the years is the maximum capacity of production. It seems like it has been reduced somehow. That why the following data manipulations are done and we took data from the beginning of 2022.
+
+```{r 2}
+DT <- data.table(datawnew)
+DTmean<-DT[, mean(value.TEMP), by = datetime, ]
+DTmean2<-DT[, mean(value.DSWRF), by = datetime]
+DTmean3<-DT[, mean(value.CLOUD_LOW_LAYER), by = datetime]
+DTmean4<-DT[, mean(value.REL_HUMIDITY), by = datetime]
+data1<-merge(DTmean,DTmean2,by="datetime")
+data2<-merge(data1,DTmean3,by="datetime")
+data<-merge(data2,DTmean4,by="datetime")
+colnames(data)<-c("datetime","temp","dswrf","cloud_low_layer","rel_humidity")
+mergeddata<-merge(data,datap,by="datetime")
+newdata=mergeddata[mergeddata$date >="2022-01-01",]
+newdata=newdata[newdata$hour >6 & newdata$hour<19,]
+#head(newdata,25)
+#tail(newdata,25)
+
+```
+
+## 3.2 Exploratory Data Analysis
+
+Total sum of production of the each day is plotted to understand data better. It can be observed that there is increasing trend towards the summer months.
+
+```{r}
+daily_series=newdata[,list(total=sum(production)),by=list(date)]
+ggplot(daily_series, aes(date,total, group=1)) + geom_line() +geom_point()
+acf(daily_series$total)
+acf(newdata$production)
+
+```
+
+From the ggpairs and correlation plot, we can see that temperature, cloud low layer, rel humidty and dswrf have significant but almost equally weighted effect on production amount. However, there are also significant correlations  between these variables so some of these variables' effect might be explained by using the others' effect.Thus, in our regression models we tried to use combination of different parameters at each iteration to obtain better model.
+
+Also the reason behind observing high autocorrelation values at lag 12 and 24 is because we only use 12 hours of the day since we removed the hours that sun doesn't appear. 
+
+```{r 3}
+ggpairs(newdata)
+basedata=newdata[,-c("date")]
+basedata=basedata[,-c("hour")]
+basedata=basedata[,-c("datetime")]
+head(basedata,25)
+corr<-round(cor(basedata),1)
+ggcorrplot(corr,hc.order=TRUE,type="lower",lab=TRUE)
+
+```
+
+
+## 3.3 Regression Approach
+
+We applied two different approaches to the regression method. First of all, we tried to create a base model over the production rate and improve it using different regressors. Since the predictions we applied on the test data and the production rate rates in the data were not as close as we desired, we tried to create the model in a different way. For this, we tried to approach the real data with our predictions by building a different model for each hour. By examining the given data hour by hour, we developed our models and made predictions and obtained closer results.
+
+
+# 3.3.1 Regression Approach based on Production Amount
+
+```{r}
+newdata2=mergeddata[mergeddata$date >="2022-01-01",]
+datapn<-data.table(newdata)
+datapn2<-newdata2
+dataph5<-datapn2[hour==5]
+dataph6<-datapn2[ hour==6]
+dataph7<-datapn2[hour==7]
+dataph8<-datapn2[ hour==8]
+dataph9<-datapn2[hour==9]
+dataph10<-datapn2[ hour==10]
+dataph11<-datapn2[ hour==11]
+dataph12<-datapn2[hour==12]
+dataph13<-datapn2[ hour==13]
+dataph14<-datapn2[hour==14]
+dataph15<-datapn2[ hour==15]
+dataph16<-datapn2[ hour==16]
+dataph17<-datapn2[hour==17]
+dataph18<-datapn2[ hour==18]
+dataph19<-datapn2[ hour==19]
+dataph20<-datapn2[hour==20]
+
+```
+
+
+```{r}
+datapn<-data.table(newdata)
+#head(datapn,15)
+acf(datapn$production)
+lag15<-shift(datapn$production, n=15L, fill=NA)
+datapn$lag15<-lag15
+acf(datapn$production)
+lag14<-shift(datapn$production, n=14L, fill=NA)
+datapn$lag14<-lag14
+lag13<-shift(datapn$production, n=13L, fill=NA)
+datapn$lag13<-lag13
+lag12<-shift(datapn$production, n=12L, fill=NA)
+datapn$lag12<-lag12
+lag11<-shift(datapn$production, n=11L, fill=NA)
+datapn$lag11<-lag11
+lag16<-shift(datapn$production, n=16L, fill=NA)
+datapn$lag6<-lag16
+#lag8<-shift(datapn$production, n=8L, fill=NA)
+#datapn$lag8<-lag8
+lag1<-shift(datapn$production, n=1L, fill=NA)
+datapn$lag1<-lag1
+lag2<-shift(datapn$production, n=2L, fill=NA)
+datapn$lag2<-lag2
+datapn$hoursoftheday<-as.factor(datapn$hour)
+datapn$season<-as.factor(quarter(datapn$date))
+datapn[,tmax:=max(temp),by=date]
+datapn[,tmin:=min(temp),by=date]
+trend<-c(1:nrow((datapn)))
+datapn$trend<-trend
+lag1dswrf<-shift(datapn$dswrf, n=1L, fill=NA)
+datapn$lag1dswrf<-lag1dswrf
+lag12dswrf<-shift(datapn$dswrf, n=12L, fill=NA)
+datapn$lag12dswrf<-lag12dswrf
+
+#datapn[,trend:=c(1:140),by=date]
+#datapn$sun[datapn$hour>7 & datapn$hour<19]<-1
+#datapn[is.na(sun),sun:=0]
+#datapn$sun<-as.factor(datapn$sun)
+#datapn$month<-as.facto?(month(datapn$date))
+```
+
+```{r}
+
+lm0<-lm(production~dswrf,data = datapn)
+summary(lm0)
+checkresiduals(lm0)
+#################################################
+
+
+lm2<-lm(production~dswrf+lag12,data = datapn)
+summary(lm2)
+checkresiduals(lm2)
+
+#############################################
+
+lm3<-lm(production~dswrf+lag12+cloud_low_layer,data = datapn)
+summary(lm3)
+checkresiduals(lm3)
+
+############################################
+
+lm4<-lm(production~dswrf+lag12+cloud_low_layer+lag6+lag1,data = datapn)
+summary(lm4)
+checkresiduals(lm4)
+
+##########################################
+
+lm5<-lm(production~dswrf+lag12+cloud_low_layer+lag1+tmax+tmin+lag6,data = datapn)
+summary(lm5)
+checkresiduals(lm5)
+
+##########################################
+
+
+lm6<-lm(production~dswrf+lag12+cloud_low_layer+lag1+tmax+hoursoftheday,data = datapn)
+summary(lm6)
+checkresiduals(lm6)
+
+#########################################
+
+lm7<-lm(production~log(dswrf+1)+lag12+log(cloud_low_layer+1)+lag1+tmax+hoursoftheday,data = datapn)
+summary(lm7)
+checkresiduals(lm7)
+
+########################################
+
+lm8<-lm(production~log(dswrf+1)+lag12+season+log(cloud_low_layer+1)+lag1+tmax+hoursoftheday,data = datapn)
+summary(lm8)
+checkresiduals(lm8)
+
+##########################################
+lm9<-lm(production~log(dswrf+1)+lag12+season+log(cloud_low_layer+1)+tmax+hoursoftheday+trend+lag1,data = datapn)
+summary(lm9)
+checkresiduals(lm9)
+##############################################
+
+lm10<-lm(production~log(dswrf+1)+lag12+season+log(cloud_low_layer+1)+tmax+hoursoftheday+trend+rel_humidity+lag1,data = datapn)
+summary(lm10)
+checkresiduals(lm10)
+
+##############################################
+
+lm11<-lm(production~log(dswrf+1)+lag12+season+log(cloud_low_layer+1)+tmax+hoursoftheday+trend+lag2+lag1+lag1dswrf,data = datapn)
+summary(lm11)
+checkresiduals(lm11)
+
+############################################
+tmp=copy(datapn)
+predicted<-predict(lm11,tmp)
+tmp$actual<-tmp$production
+tmp$predicted<-predicted
+tmp$predicted[tmp$predicted>=35]=35
+tmp$predicted[tmp$predicted<=0]=0
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+#head(tmp,35)
+#tail(tmp,25)
+
+########################?###################
+
+lm12<-lm(production~log(dswrf+1)+lag12+season+log(cloud_low_layer+1)+tmax+hoursoftheday+lag2+lag1+lag1dswrf,data = datapn)
+summary(lm12)
+checkresiduals(lm12)
+
+##################################?##########
+tmp2=copy(datapn)
+predicted<-predict(lm12,tmp)
+#predicted
+tmp2$actual<-tmp$production
+tmp2$predicted<-predicted
+tmp2$predicted[tmp2$predicted>=35]=35
+tmp2$predicted[tmp2$predicted<=0]=0
+ggplot(tmp2,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+#head(tmp2,35)
+#tail(tmp2,25)
+
+```
+In this approach, it can be seen from the summary tables, especially from adjusted R^2 square values, and plots that by adding new parameters, such as lags, seasonality and trend we tried to make better model at each iteration.
+
+
+# 3.3.2 Regression Approach based on hour-by-hour Production Amount 
+
+```{r,warning=FALSE}
+datawDegerler<-reshape(dataw,idvar=c("date","hour","lat","lon"),timevar="variable",direction = "wide",v.names="value")
+#head(datawDegerler,10)
+
+#esas data is coming
+DT2 <- data.table(datawDegerler)
+DTmean2<-DT2[, mean(value.TEMP), by = datetime, ]
+DTmean22<-DT2[, mean(value.DSWRF), by = datetime]
+DTmean32<-DT2[, mean(value.CLOUD_LOW_LAYER), by = datetime]
+DTmean42<-DT2[, mean(value.REL_HUMIDITY), by = datetime]
+data12<-merge(DTmean2,DTmean22,by="datetime")
+data22<-merge(data12,DTmean32,by="datetime")
+data2<-merge(data22,DTmean42,by="datetime")
+colnames(data2)<-c("datetime","temp","dswrf","cloud_low_layer","rel_humidity")
+
+
+```
+
+t=06.00 am:
+```{r,warning=FALSE}
+lag1<-shift(dataph6$production, n=1L, fill=NA)
+dataph6$lag1<-lag1
+dataph6$season<-as.factor(quarter(dataph6$date))
+modelh6<-lm(production~dswrf+temp+lag1+season,data=dataph6)
+summary(modelh6)
+checkresiduals(modelh6)
+acf(dataph6$production)
+tmp=copy(dataph6)
+predicted<-predict(modelh6,tmp)
+tmp$actual<-tmp$production
+#rmse(tmp$actual, tmp$predicted,na.rm=TRUE)
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+```
+
+
+to predict new day's production by using previous data:
+```{r,warning=FALSE}
+test<-dataph6[142,]
+test$datetime=="2022-05-24 09:00:00"
+test$date=as.Date("2022-05-24")
+test$temp=287.1000
+test$dswrf=1.535556
+test$cloud_low_layer=8.02222222	
+test$rel_humidity=57.97778
+test$hour=6
+test$lag1=6.11
+test$season=as.factor(quarter(test$date))
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+#tail(tmp,15)
+#mp<-tmp[-141,]
+
+
+#tail(tmp,15)
+predicted<-predict(modelh6,tmp)
+tmp$predicted<-predicted
+
+tmp[is.na(production),production:=predicted]
+
+
+#tail(tmp,15)
+
+test$datetime=="2022-05-25 06:00:00"
+test$date=as.Date("2022-05-25")
+test$temp=288.8556
+test$dswrf=1.595556	
+test$cloud_low_layer=0.00000000	
+test$rel_humidity=43.98889
+test$hour=6
+test$lag1= 7.048636
+test$season=as.factor(quarter(test$date))
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+#tail(tmp,15)
+
+predicted<-predict(modelh6,tmp)
+tmp$predicted<-predicted
+
+#tail(tmp,15)
+
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-05-25 06:00:00"
+test$date=as.Date("2022-05-26")
+test$temp= 290.0808
+test$dswrf=1.667556
+test$cloud_low_layer=0.00000000		
+test$rel_humidity=54.47778
+test$hour=6
+test$lag1=7.636677
+test$season=as.factor(quarter(test$date))
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+#tail(tmp,15)
+
+predicted<-predict(modelh6,tmp)
+tmp$predicted<-predicted
+
+tail(tmp,15)
+data2[datetime=="2022-05-27 10:00:00"]
+```
+
+t=07.00 am:
+```{r,warning=FALSE}
+dataph7[,trend:=1:.N]
+lag1<-shift(dataph7$production, n=1L, fill=NA)
+dataph7$lag1<-lag1
+
+modelh7<-lm(production~dswrf+temp+trend,data=dataph7)
+tmp=copy(dataph7)
+predicted<-predict(modelh7,tmp)
+tmp$actual<-tmp$production
+#rmse(tmp$actual, tmp$predicted,na.rm=TRUE)
+#data2[datetime=="2022-06-01 10:00:00"]
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+
+```
+
+
+```{r, results='hide',warning=FALSE}
+test<-dataph7[146,]
+
+
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-05-28 07:00:00"
+test$date=as.Date("2022-05-28")
+test$temp= 295.5739
+test$dswrf=29.62		
+test$cloud_low_layer= 0.1444444
+test$rel_humidity=38.6
+test$hour=7
+test$trend=146
+test$lag1=25.45	
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+predicted<-predict(modelh7,tmp)
+tmp$predicted<-predicted
+
+tail(tmp,15)
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-05-29 07:00:00"
+test$date=as.Date("2022-05-29")
+test$temp= 295.5257		
+test$dswrf=30.42444	
+test$cloud_low_layer= 0
+test$rel_humidity=38.63333
+test$hour=7
+test$trend=147
+test$lag1=25.45		
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+predicted<-predict(modelh7,tmp)
+tmp$predicted<-predicted
+
+tail(tmp,15)
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-05-30 07:00:00"
+test$date=as.Date("2022-05-30")
+test$temp= 296.555	
+test$dswrf=30.60089		
+test$cloud_low_layer= 0
+test$rel_humidity=37.91111
+test$hour=7
+test$trend=148
+test$lag1=25.45	
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+predicted<-predict(modelh7,tmp)
+tmp$predicted<-predicted
+
+tail(tmp,15)
+
+```
+
+t=08.00 am:
+```{r,warning=FALSE}
+dataph8[,trend:=1:.N]
+
+modelh8<-lm(production~dswrf+temp+trend+(cloud_low_layer)^2,data=dataph8)
+tmp=copy(dataph8)
+predicted<-predict(modelh8,tmp)
+tmp$actual<-tmp$production
+#rmse(tmp$actual, tmp$predicted,na.rm=TRUE)
+
+#data2[datetime=="2022-05-30 11:00:00"]
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+
+```
+
+```{r, results='hide',warning=FALSE}
+test<-dataph8[146,]
+
+
+tmp[is.na(production),production:=predicted]
+
+
+tail(tmp,15)
+tail(tmp,15)
+test$datetime=="2022-05-28 08:00:00"
+test$date=as.Date("2022-05-28")
+test$temp=295.5739		
+test$dswrf=85.33156		
+test$cloud_low_layer=	0.1444444		
+test$rel_humidity=38.6
+test$hour=8
+test$trend=146
+
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+tail(tmp,15)
+predicted<-predict(modelh8,tmp)
+tmp$predicted<-predicted
+
+
+
+
+tail(tmp,15)
+tmp[is.na(production),production:=predicted]
+
+
+
+tail(tmp,15)
+tail(tmp,15)
+test$datetime=="2022-05-29 08:00:00"
+test$date=as.Date("2022-05-29")
+test$temp=297.3778		
+test$dswrf=87.00622		
+test$cloud_low_layer=	0		
+test$rel_humidity=32.16667
+test$hour=8
+test$trend=147
+
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+tail(tmp,15)
+predicted<-predict(modelh8,tmp)
+tmp$predicted<-predicted
+
+
+tail(tmp,15)
+tmp[is.na(production),production:=predicted]
+
+
+tail(tmp,15)
+tail(tmp,15)
+test$datetime=="2022-05-30 08:00:00"
+test$date=as.Date("2022-05-30")
+test$temp=298.1397		
+test$dswrf=87.13422		
+test$cloud_low_layer=	0		
+test$rel_humidity=32.32222
+test$hour=8
+test$trend=148
+
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+tail(tmp,15)
+predicted<-predict(modelh8,tmp)
+tmp$predicted<-predicted
+
+tmp[is.na(production),production:=predicted]
+tmp$predicted[tmp$predicted>=35]=35
+
+
+tail(tmp,15)
+```
+
+t=09.00 am:
+```{r,warning=FALSE}
+dataph9[,trend:=1:.N]
+
+modelh9<-lm(production~dswrf+temp+log(cloud_low_layer+1)+trend,data=dataph9)
+tmp=copy(dataph9)
+predicted<-predict(modelh9,tmp)
+tmp$actual<-tmp$production
+#rmse(tmp$actual, tmp$predicted,na.rm=TRUE)
+#data2[datetime=="2022-05-30 12:00:00"]
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+
+```
+
+```{r, results='hide',warning=FALSE}
+test<-dataph9[146,]
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-05-28 09:00:00"
+test$date=as.Date("2022-05-28")
+test$temp=297.0332		
+test$dswrf=157.0436		
+test$cloud_low_layer=0.3
+test$rel_humidity=33.57778
+test$hour=9
+test$trend=146
+ 
+ 
+ 
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+#tail(tmp,15)
+
+predicted<-as.numeric(predict(modelh9,tmp))
+tmp$predicted<-predicted
+
+
+#tail(tmp,15)
+
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-05-29 09:00:00"
+test$date=as.Date("2022-05-29")
+test$temp=298.6696		
+test$dswrf=158.96		
+test$cloud_low_layer= 0
+test$rel_humidity=29.81111
+test$hour=9
+test$trend=147
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+
+predicted<-predict(modelh9,tmp)
+tmp$predicted<-predicted
+tmp$predicted[tmp$predicted>=35]=35
+
+#tail(tmp,15)
+
+test$datetime=="2022-05-30 09:00:00"
+test$date=as.Date("2022-05-30")
+test$temp=299.4428				
+test$dswrf=158.9796			
+test$cloud_low_layer=0			
+test$rel_humidity=29.95556
+test$hour=9
+test$trend=148
+
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+predicted<-predict(modelh9,tmp)
+tmp$predicted<-predicted
+tmp$predicted[tmp$predicted>=35]=35
+
+tmp[is.na(production),production:=predicted]
+
+
+#tail(tmp,15)
+```
+
+
+t=10.00 am:
+```{r,warning=FALSE}
+dataph10[,trend:=1:.N]
+
+modelh10<-lm(production~dswrf+log(cloud_low_layer+1)+temp+trend,data=dataph10)
+tmp=copy(dataph10)
+predicted<-predict(modelh10,tmp)
+tmp$actual<-tmp$production
+#rmse(tmp$actual, tmp$predicted,na.rm=TRUE)
+#data2[datetime=="2022-05-30 13:00:00"]
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+
+
+```
+
+
+```{r, results='hide',warning=FALSE}
+test<-dataph10[146,]
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-05-28 10:00:00"
+test$date=as.Date("2022-05-28")
+test$temp=298.4259			
+test$dswrf=704.4044			
+test$cloud_low_layer=0
+test$rel_humidity=29.41111
+test$hour=10
+test$trend=146
+ 
+ 
+ 
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+
+predicted<-as.numeric(predict(modelh10,tmp))
+tmp$predicted<-predicted
+
+
+#tail(tmp,15)
+
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-05-29 10:00:00"
+test$date=as.Date("2022-05-29")
+test$temp=299.703			
+test$dswrf=705.2933			
+test$cloud_low_layer= 0
+test$rel_humidity=28.51111
+test$hour=10
+test$trend=147
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+
+predicted<-predict(modelh10,tmp)
+tmp$predicted<-predicted
+tmp$predicted[tmp$predicted>=35]=35
+
+#tail(tmp,15)
+
+test$datetime=="2022-05-30 10:00:00"
+test$date=as.Date("2022-05-30")
+test$temp=300.61					
+test$dswrf=704.9311				
+test$cloud_low_layer=0			
+test$rel_humidity=28.2
+
+test$hour=10
+test$trend=148
+
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+predicted<-predict(modelh10,tmp)
+tmp$predicted<-predicted
+tmp$predicted[tmp$predicted>=35]=35
+
+tmp[is.na(production),production:=predicted]
+
+
+#tail(tmp,15)
+```
+
+t=11.00 am:
+```{r,warning=FALSE}
+dataph11[,trend:=1:.N]
+
+modelh11<-lm(production~dswrf+temp+trend,data=dataph11)
+tmp=copy(dataph11)
+predicted<-predict(modelh11,tmp)
+tmp$actual<-tmp$production
+#rmse(tmp$actual, tmp$predicted,na.rm=TRUE)
+data2[datetime=="2022-05-30 19:00:00"]
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+
+```
+
+```{r, results="hide",warning=FALSE}
+test<-dataph11[146,]
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-05-28 11:00:00"
+test$date=as.Date("2022-05-28")
+test$temp=299.4056				
+test$dswrf=780.2378				
+test$cloud_low_layer=0
+test$rel_humidity=27.28889
+test$hour=11
+test$trend=146
+ 
+ 
+ 
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+
+predicted<-as.numeric(predict(modelh11,tmp))
+tmp$predicted<-predicted
+
+
+tail(tmp,15)
+
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-05-29 11:00:00"
+test$date=as.Date("2022-05-29")
+test$temp=300.625				
+test$dswrf=779.8978				
+test$cloud_low_layer= 0
+test$rel_humidity=27.42222
+test$hour=11
+test$trend=147
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+
+predicted<-predict(modelh11,tmp)
+tmp$predicted<-predicted
+tmp$predicted[tmp$predicted>=35]=35
+
+tail(tmp,15)
+
+test$datetime=="2022-05-30 11:00:00"
+test$date=as.Date("2022-05-30")
+test$temp=301.6403						
+test$dswrf=779.9978					
+test$cloud_low_layer=0			
+test$rel_humidity=26.55556
+
+
+test$hour=11
+test$trend=148
+
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+predicted<-predict(modelh11,tmp)
+tmp$predicted<-predicted
+tmp$predicted[tmp$predicted>=35]=35
+
+tmp[is.na(production),production:=predicted]
+
+
+tail(tmp,15)
+
+```
+
+t=12.00 pm :
+```{r,warning=FALSE}
+dataph12[,trend:=1:.N]
+modelh12<-lm(production~dswrf+temp+log(cloud_low_layer+1)+trend,data=dataph12)
+tmp=copy(dataph12)
+predicted<-predict(modelh12,tmp)
+tmp$actual<-tmp$production
+#rmse(tmp$actual,predicted)
+data2[datetime=="2022-06-02 15:00:00"]
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+
+
+```
+
+```{r, results="hide",warning=FALSE}
+test<-dataph12[146,]
+test$datetime=="2022-05-28 12:00:00"
+test$date=as.Date("2022-05-28")
+test$temp=299.9838	
+test$dswrf=839.3756			
+test$cloud_low_layer=0.06666667		
+test$rel_humidity=26.53333
+test$hour=12
+test$trend=146
+
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+tail(tmp,15)
+predicted<-predict(modelh12,tmp)
+tmp$predicted<-predicted
+
+tmp[is.na(production),production:=predicted]
+
+
+tail(tmp,15)
+
+test$datetime=="2022-05-29 12:00:00"
+test$date=as.Date("2022-05-29")
+test$temp=301.4111			
+test$dswrf=838.273		
+test$cloud_low_layer=0.0444444
+test$rel_humidity= 25.74444
+test$hour=12
+test$trend=147
+ 
+ 
+ 
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+
+predicted<-as.numeric(predict(modelh11,tmp))
+tmp$predicted<-predicted
+
+
+tail(tmp,15)
+
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-05-30 12:00:00"
+test$date=as.Date("2022-05-30")
+test$temp= 302.5087
+test$dswrf=838.7644			
+test$cloud_low_layer= 0.05555556
+test$rel_humidity= 24.95556
+test$hour=12
+test$trend=148
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+predicted<-predict(modelh11,tmp)
+tmp$predicted<-predicted
+tmp$predicted[tmp$predicted>=35]=35
+
+tail(tmp,15)
+
+```
+
+t=01.00 pm:
+```{r, results='hide',warning=FALSE}
+dataph13[,trend:=1:.N]
+modelh13<-lm(production~temp+dswrf+cloud_low_layer^3+rel_humidity^3,data=dataph13)
+summary(modelh13)
+tmp=copy(dataph13)
+dataph13
+predicted<-predict(modelh13,tmp)
+predicted
+tmp$actual<-tmp$production
+#rmse(tmp$actual,predicted)
+data2[datetime=="2022-06-03 16:00:00"]
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+
+```
+
+```{r, results='hide',warning=FALSE}
+test<-dataph13[150,]
+test$datetime=="2022-06-01 13:00:00"
+test$date=as.Date("2022-06-01")
+test$temp=301.2777	
+test$dswrf=	886.28			
+test$cloud_low_layer=	0.3111	
+test$rel_humidity=29.5777
+test$hour=13
+test$trend=150
+
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+tail(tmp,15)
+predicted<-predict(modelh12,tmp)
+tmp$predicted<-predicted
+
+tmp[is.na(production),production:=predicted]
+
+
+tail(tmp,15)
+
+test$datetime=="2022-06-02 13:00:00"
+test$date=as.Date("2022-06-02")
+test$temp=301.1825			
+test$dswrf=850.0355		
+test$cloud_low_layer=0
+test$rel_humidity=28.9111
+test$hour=13
+test$trend=151
+ 
+ 
+ 
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+
+predicted<-as.numeric(predict(modelh13,tmp))
+tmp$predicted<-predicted
+
+
+tail(tmp,15)
+
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-06-03 13:00:00"
+test$date=as.Date("2022-06-03")
+test$temp= 299.8876
+test$dswrf=894.6466			
+test$cloud_low_layer= 0.2333
+test$rel_humidity=30.3888
+test$hour=13
+test$trend=152
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+predicted<-predict(modelh13,tmp)
+tmp$predicted<-predicted
+#tmp$predicted[tmp$predicted>=35]=35
+
+tail(tmp,15)
+```
+
+t=02.00 pm:
+```{r,warning=FALSE}
+dataph14[,trend:=1:.N]
+modelh14<-lm(production~temp+dswrf+cloud_low_layer^3+rel_humidity^3,data=dataph14)
+summary(modelh14)
+tmp=copy(dataph14)
+#dataph14
+predicted<-predict(modelh14,tmp)
+#predicted
+tmp$actual<-tmp$production
+#rmse(tmp$actual,predicted)
+data2[datetime=="2022-06-03 16:00:00"]
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+
+```
+
+```{r, results='hide',warning=FALSE}
+test<-dataph14[150,]
+test$datetime=="2022-06-01 14:00:00"
+test$date=as.Date("2022-06-01")
+test$temp=301.2777	
+test$dswrf=	886.28			
+test$cloud_low_layer=	0.3111	
+test$rel_humidity=29.5777
+test$hour=14
+test$trend=150
+
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+tail(tmp,15)
+predicted<-predict(modelh14,tmp)
+tmp$predicted<-predicted
+
+tmp[is.na(production),production:=predicted]
+
+
+tail(tmp,15)
+
+test$datetime=="2022-06-02 14:00:00"
+test$date=as.Date("2022-06-02")
+test$temp=301.1825			
+test$dswrf=850.0355		
+test$cloud_low_layer=0
+test$rel_humidity=28.9111
+test$hour=14
+test$trend=151
+ 
+ 
+ 
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+
+predicted<-as.numeric(predict(modelh14,tmp))
+tmp$predicted<-predicted
+
+
+tail(tmp,15)
+
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-06-03 14:00:00"
+test$date=as.Date("2022-06-03")
+test$temp= 299.8876
+test$dswrf=894.6466			
+test$cloud_low_layer= 0.2333
+test$rel_humidity=30.3888
+test$hour=14
+test$trend=152
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+predicted<-predict(modelh14,tmp)
+tmp$predicted<-predicted
+#tmp$predicted[tmp$predicted>=35]=35
+
+tail(tmp,15)
+
+```
+
+t=03.00 pm :
+```{r,warning=FALSE}
+dataph15[,trend:=1:.N]
+lag15<-shift(dataph15$production, n=15L, fill=NA)
+lag14<-shift(dataph15$production, n=14L, fill=NA)
+dataph15$lag15<-lag15
+dataph15$lag14<-lag14
+#season15<-as.factor(quarter(dataph15$date))
+
+modelh15<-lm(production~dswrf+log(cloud_low_layer +1)+log(lag15)+lag14+trend,data=dataph15)
+summary(modelh15)
+checkresiduals(modelh15)
+tmp=copy(dataph15)
+predicted<-predict(modelh15,tmp)
+#predicted
+tmp$actual<-tmp$production
+#rmse(tmp$actual,predicted)
+data2[datetime=="2022-06-03 18:00:00"]
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+```
+
+```{r, results='hide',warning=FALSE}
+test<-dataph15[150,]
+test$datetime=="2022-06-01 15:00:00"
+test$date=as.Date("2022-06-01")
+test$temp=301.6591	
+test$dswrf=902.3253			
+test$cloud_low_layer=	0.4222		
+test$rel_humidity=28.8888
+test$hour=15
+test$trend=150
+
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+tail(tmp,15)
+predicted<-predict(modelh15,tmp)
+tmp$predicted<-predicted
+
+tmp[is.na(production),production:=predicted]
+
+
+tail(tmp,15)
+
+test$datetime=="2022-06-02 15:00:00"
+test$date=as.Date("2022-06-02")
+test$temp=302.3927		
+test$dswrf=876.0462	
+test$cloud_low_layer=0
+test$rel_humidity=24.5333
+test$hour=15
+test$trend=151
+ 
+ 
+ 
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+
+predicted<-as.numeric(predict(modelh15,tmp))
+tmp$predicted<-predicted
+
+
+tail(tmp,15)
+
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-06-03 15:00:00"
+test$date=as.Date("2022-06-03")
+test$temp= 300.6522
+test$dswrf=918.2844			
+test$cloud_low_layer= 0
+test$rel_humidity=27.0888
+test$hour=15
+test$trend=152
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+predicted<-predict(modelh15,tmp)
+tmp$predicted<-predicted
+#tmp$predicted[tmp$predicted>=38.50]=40
+
+tail(tmp,15)
+```
+
+t=04.00 pm:
+```{r,warning=FALSE}
+dataph16[,trend:=1:.N]
+lag8<-shift(dataph16$production, n=5L, fill=NA)
+dataph16$lag8<-lag8
+season16<-as.factor(quarter(dataph16$date))
+
+modelh16<-lm(production~dswrf+log(cloud_low_layer+1)+temp^2,data=dataph16)
+modelh16$season16<-season16
+summary(modelh16)
+checkresiduals(modelh16)
+tmp=copy(dataph16)
+predicted<-predict(modelh16,tmp)
+tmp$actual<-tmp$production
+#rmse(tmp$actual,predicted)
+data2[datetime=="2022-06-03 19:00:00"]
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+```
+
+```{r,results='hide',warning=FALSE}
+test<-dataph16[150,]
+test$datetime=="2022-06-01 16:00:00"
+test$date=as.Date("2022-06-01")
+test$temp=301.325
+test$dswrf=	765.8177			
+test$cloud_low_layer=0.6888	
+test$rel_humidity=27.5444
+test$hour=16
+test$trend=150
+
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+tail(tmp,15)
+predicted<-predict(modelh16,tmp)
+tmp$predicted<-predicted
+
+tmp[is.na(production),production:=predicted]
+
+
+tail(tmp,15)
+
+test$datetime=="2022-06-02 16:00:00"
+test$date=as.Date("2022-06-02")
+test$temp=302.2915			
+test$dswrf=778.32
+test$cloud_low_layer=0
+test$rel_humidity=24.9888
+test$hour=16
+test$trend=151
+ 
+ 
+ 
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+
+predicted<-as.numeric(predict(modelh16,tmp))
+tmp$predicted<-predicted
+
+
+tail(tmp,15)
+
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-06-03 16:00:00"
+test$date=as.Date("2022-06-03")
+test$temp= 300.4403
+test$dswrf=802.2133			
+test$cloud_low_layer=0
+test$rel_humidity=26.3444
+test$hour=16
+test$trend=151
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+predicted<-predict(modelh16,tmp)
+tmp$predicted<-predicted
+#tmp$predicted[tmp$predicted>=40]=40
+
+tail(tmp,15)
+```
+
+t=5.00 pm:
+```{r,warning=FALSE}
+dataph17[,trend:=1:.N]
+#dataph17
+lag5<-shift(dataph17$production, n=9L, fill=NA)
+dataph17$lag5<-lag5
+#modelh17$season17<-as.factor(month(dataph17$date))
+modelh17<-lm(production~dswrf+temp^2,data=dataph17)
+summary(modelh17)
+checkresiduals(modelh17)
+tmp=copy(dataph17)
+predicted<-predict(modelh17,tmp)
+tmp$actual<-tmp$production
+#rmse(tmp$actual,predicted)
+data2[datetime=="2022-06-03 20:00:00"]
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+```
+
+```{r,results='hide',warning=FALSE}
+test<-dataph17[150,]
+test$datetime=="2022-06-01 17:00:00"
+test$date=as.Date("2022-06-01")
+test$temp=300.5918
+test$dswrf=	676.0822			
+test$cloud_low_layer=0.8888
+test$rel_humidity=28.1444
+test$hour=17
+test$trend=150
+
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+tail(tmp,15)
+predicted<-predict(modelh17,tmp)
+tmp$predicted<-predicted
+
+tmp[is.na(production),production:=predicted]
+
+
+tail(tmp,15)
+
+test$datetime=="2022-06-02 17:00:00"
+test$date=as.Date("2022-06-02")
+test$temp=301.6315			
+test$dswrf=694.8133
+test$cloud_low_layer=0
+test$rel_humidity=26.0888
+test$hour=17
+test$trend=151
+ 
+ 
+ 
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+
+predicted<-as.numeric(predict(modelh17,tmp))
+tmp$predicted<-predicted
+
+
+tail(tmp,15)
+
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-06-03 17:00:00"
+test$date=as.Date("2022-06-03")
+test$temp= 299.6567
+test$dswrf=717.04			
+test$cloud_low_layer=0
+test$rel_humidity=26.6666
+test$hour=17
+test$trend=152
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+predicted<-predict(modelh17,tmp)
+tmp$predicted<-predicted
+#tmp$predicted[tmp$predicted>=40]=40
+
+tail(tmp,15)
+```
+
+t=06.00 pm:
+```{r,warning=FALSE}
+lag1<-shift(dataph18$production, n=1L, fill=NA)
+dataph18$lag1<-lag1
+dataph18$season<-as.factor(quarter(dataph18$date))
+#trend<-c(1:nrow((dataph19)))
+#dataph19$trend<-trend
+modelh18<-lm(production~dswrf+temp+lag1+season,data=dataph18)
+summary(modelh18)
+checkresiduals(modelh18)
+acf(dataph18$production)
+tmp=copy(dataph18)
+predicted<-predict(modelh18,tmp)
+tmp$actual<-tmp$production
+#rmse(tmp$actual, tmp$predicted,na.rm=TRUE)
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+
+```
+
+```{r,results='hide',warning=FALSE}
+test<-dataph18[147,]
+test$datetime=="2022-05-29 18:00:00"
+test$date=as.Date("2022-05-29")
+test$temp=300.3162
+test$dswrf= 547.0822	
+test$cloud_low_layer=	 0.5555556
+test$rel_humidity=29.08889
+test$hour=18
+test$lag1=9.47
+test$season=as.factor(quarter(test$date))
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+tail(tmp,15)
+
+
+
+tail(tmp,15)
+predicted<-predict(modelh18,tmp)
+tmp$predicted<-predicted
+
+tmp[is.na(production),production:=predicted]
+
+
+tail(tmp,15)
+
+test$datetime=="2022-05-30 06:00:00"
+test$date=as.Date("2022-05-30")
+test$temp=302.3384
+test$dswrf=585.2489 
+test$cloud_low_layer=  0.03333333 
+test$rel_humidity=20.13333
+test$hour=18
+test$lag1=7.149623
+test$season=as.factor(quarter(test$date))
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+
+predicted<-predict(modelh18,tmp)
+tmp$predicted<-predicted
+
+tail(tmp,15)
+
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-05-31 06:00:00"
+test$date=as.Date("2022-05-31")
+test$temp= 300.5444
+test$dswrf=618.4689 
+test$cloud_low_layer=  0
+test$rel_humidity=  20.6
+test$hour=18
+test$lag1=7.190887
+test$season=as.factor(quarter(test$date))
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+predicted<-predict(modelh18,tmp)
+tmp$predicted<-predicted
+
+tail(tmp,15)
+```
+
+t=07.00 pm:
+```{r,results='hide',warning=FALSE}
+lag1<-shift(dataph19$production, n=1L, fill=NA)
+dataph19$lag1<-lag1
+dataph19$season<-as.factor(quarter(dataph19$date))
+#trend<-c(1:nrow((dataph19)))
+#dataph19$trend<-trend
+modelh19<-lm(production~dswrf+temp+lag1+season,data=dataph19)
+summary(modelh19)
+checkresiduals(modelh19)
+acf(dataph19$production)
+tmp=copy(dataph19)
+predicted<-predict(modelh19,tmp)
+tmp$actual<-tmp$production
+#rmse(tmp$actual, tmp$predicted,na.rm=TRUE)
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+
+```
+
+```{r,results='hide',warning=FALSE}
+test<-dataph19[147,]
+test$datetime=="2022-05-29 19:00:00"
+test$date=as.Date("2022-05-29")
+test$temp=299.3127
+test$dswrf=442.9733
+test$cloud_low_layer=	1.122222
+test$rel_humidity=33.05556
+test$hour=19
+test$lag1=1.23
+test$season=as.factor(quarter(test$date))
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+tail(tmp,15)
+
+
+
+tail(tmp,15)
+predicted<-predict(modelh19,tmp)
+tmp$predicted<-predicted
+
+tmp[is.na(production),production:=predicted]
+
+
+tail(tmp,15)
+
+test$datetime=="2022-05-30 06:00:00"
+test$date=as.Date("2022-05-30")
+test$temp=300.7123
+test$dswrf=493.2111
+test$cloud_low_layer=0
+test$rel_humidity=25.44444
+test$hour=19
+test$lag1=1.0643857
+test$season=as.factor(quarter(test$date))
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+
+predicted<-predict(modelh19,tmp)
+tmp$predicted<-predicted
+
+tail(tmp,15)
+
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-05-31 06:00:00"
+test$date=as.Date("2022-05-31")
+test$temp= 299.024
+test$dswrf=518.5778 
+test$cloud_low_layer=  0
+test$rel_humidity= 25.17778
+test$hour=19
+test$lag1= 0.9746842
+test$season=as.factor(quarter(test$date))
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+predicted<-predict(modelh19,tmp)
+tmp$predicted<-predicted
+
+tail(tmp,15)
+```
+
+t=08.00 pm:
+```{r,warning=FALSE}
+lag1<-shift(dataph20$production, n=1L, fill=NA)
+dataph20$lag1<-lag1
+dataph20$season<-as.factor(quarter(dataph20$date))
+#trend<-c(1:nrow((dataph19)))
+#dataph19$trend<-trend
+modelh20<-lm(production~dswrf+temp+lag1+season,data=dataph20)
+summary(modelh20)
+checkresiduals(modelh20)
+acf(dataph20$production)
+tmp=copy(dataph20)
+predicted<-predict(modelh20,tmp)
+tmp$actual<-tmp$production
+#rmse(tmp$actual, tmp$predicted,na.rm=TRUE)
+ggplot(tmp,aes(x=date))+geom_line(aes(y=actual,color='real'))+geom_line(aes(y=predicted,color='prediction'))
+
+```
+
+```{r,results='hide',warning=FALSE}
+test<-dataph20[147,]
+test$datetime=="2022-05-29 20:00:00"
+test$date=as.Date("2022-05-29")
+test$temp=299.3127
+test$dswrf=442.9733
+test$cloud_low_layer=	1.122222
+test$rel_humidity=33.05556
+test$hour=20
+test$lag1=1.23
+test$season=as.factor(quarter(test$date))
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+
+tail(tmp,15)
+
+
+
+tail(tmp,15)
+predicted<-predict(modelh20,tmp)
+tmp$predicted<-predicted
+
+tmp[is.na(production),production:=predicted]
+
+
+tail(tmp,15)
+
+test$datetime=="2022-05-30 20:00:00"
+test$date=as.Date("2022-05-30")
+test$temp=300.7123
+test$dswrf=493.2111
+test$cloud_low_layer=0
+test$rel_humidity=25.44444
+test$hour=20
+test$lag1=1.0643857
+test$season=as.factor(quarter(test$date))
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+
+predicted<-predict(modelh20,tmp)
+tmp$predicted<-predicted
+
+tail(tmp,15)
+
+
+tmp[is.na(production),production:=predicted]
+
+test$datetime=="2022-05-31 20:00:00"
+test$date=as.Date("2022-05-31")
+test$temp= 299.024
+test$dswrf=518.5778 
+test$cloud_low_layer=  0
+test$rel_humidity= 25.17778
+test$hour=20
+test$lag1= 0.9746842
+test$season=as.factor(quarter(test$date))
+tmp<-rbindlist(list(tmp,test),fill=T,use.names=T)
+tail(tmp,15)
+predicted<-predict(modelh20,tmp)
+tmp$predicted<-predicted
+
+tail(tmp,15)
+
+
+
+```
+In this approach, we built a different model for each hour and generally dswrf has significant effect on production amounts. It can be seen from the summary tables of models that different parameters have different significance on each hour's model. We tried to improve our models by using different regressors.
+
+
+## 4. Results
+
+By calculating WMAPE values of our predictions day-by-day during the competition phase - 0.0270497621,	0.1475246277,	0.07585580209,		0.08897036815	0.1119473545,	0.12417366,	0.2013595874-	it can be said that our model is good enough to use for prediction. However, it is seen that our WMPAE values have increased towards the end of the competition period. It might need to be improved by using different approach.
+
+## 5. Conclusions and Future Work
+
+For this project, we first have analyzed the given data and made required data preparation and manipulation.We selected linear regression approach based on hour-by-hour production amount as our model. Although our hour-by-hour model worked well at the beginning of the competition, we have encountered some problems towards to end of the competition period. This situation might be related with the maximum production amount determined by regulation has changed. Because of that regulation , in our model, we limited the maximum amount of production. Instead of limiting the maximum amount , we might consider the capacity of the panels for the last days. There were some days that have extraordinary production amounts unrelated to our regression variables. There might be a problem with the panels or something else happened. We could not determine a certain reason to describe this kind of extraordinary situation with dummy variables. So, these outliers could not be modeled. Also, dependency between consecutive days is very strong at noon hours. Depending on the length of the days, the changing sun exposure times especially affect the morning hours of the day. This effect is explained by the trend variable in our model. However, better modeling is required for this situation which will change after June 21. Using accurate time series regression instead of linear regression would be more effective at that time period. By using different approaches, such as ARIMA/SARIMA/Exponential Smoothing Method, we might build better models. In addition to build new models with different approaches, other factors might be investigated to analyze data more detailed. Thus, better predictions might be obtained.
+
+### References 
+AlKandari & Ahmad,2019."Solar power generation forecasting using ensemble approach based on deep learning and statistical methods", Retrieved June 4,2022. [link](https://www.emerald.com/insight/content/doi/10.1016/j.aci.2019.11.002/full/pdf?title=solar-power-generation-forecasting-using-ensemble-approach-based-on-deep-learning-and-statistical-methods)
+  
