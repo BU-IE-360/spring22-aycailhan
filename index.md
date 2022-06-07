@@ -9,6 +9,8 @@
 [Here](https://bu-ie-360.github.io/spring22-aycailhan/IE-360-HW2.html) is my .html file for Homework 2.
 
 [Here](https://bu-ie-360.github.io/spring22-aycailhan/IE360HW2.Rmd) is my .RMD file for Homework 2.
-### Homework 3
+### Project
+[Here](https://bu-ie-360.github.io/spring22-aycailhan/IE360_Project_Group5.html) is my .html file for the Project.
 
+[Here](https://bu-ie-360.github.io/spring22-aycailhan/IE360_Project_Group5.Rmd) is my .RMD file for the Project.
 
